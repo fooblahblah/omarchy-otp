@@ -39,6 +39,33 @@ o.bind("SUPER + SHIFT + ALT + O", "Copy 2FA code (OCR)", "omarchy-shell otp copy
 `SUPER+ALT+O` sits next to Omarchy's own `SUPER+ALT+COMMA` ("invoke last
 notification") on purpose — both act on the notification you just received.
 
+## Requirements
+
+Everything this plugin shells out to already ships with Omarchy — there is
+nothing extra to install. Omarchy's own `omarchy capture text` uses the same
+OCR chain.
+
+| Command | Package | Used for |
+|---|---|---|
+| `jq` | `jq` | Reading the notification JSON the shell persists |
+| `wl-copy` | `wl-clipboard` | Putting the code on the clipboard |
+| `hyprpicker`, `slurp`, `grim`, `tesseract` | same names, `tesseract` | The OCR path only (`copyRegion`) |
+
+Set `OMARCHY_OCR_LANGS` to OCR in a language other than English.
+
+## Removing
+
+```bash
+omarchy plugin remove fooblahblah.otp --yes
+```
+
+Then delete the two `o.bind` lines for `SUPER + ALT + O` and
+`SUPER + SHIFT + ALT + O` from `~/.config/hypr/bindings.lua`, and reload with
+`hyprctl reload`.
+
+The plugin writes no state of its own — no config file, no cache, no daemon —
+so removing it leaves nothing behind.
+
 ## IPC
 
 | Call | Effect |
