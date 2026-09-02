@@ -1,0 +1,18 @@
+[
+  { "name": "plain verification code", "text": "Chase: Your verification code is 483920. Do not share it. Reply STOP to opt out.", "expect": "483920" },
+  { "name": "Google G- prefix", "text": "G-729104 is your Google verification code.", "expect": "729104" },
+  { "name": "Apple autofill convention", "text": "Your Apple ID code is 913472. @apple.com #913472", "expect": "913472" },
+  { "name": "four digit code", "text": "Your code is 5521", "expect": "5521" },
+  { "name": "code before the keyword", "text": "552310 is your verification code for Acme.", "expect": "552310" },
+  { "name": "code alongside a phone number", "text": "Your login code is 226719. Questions? Call 1-800-555-0199.", "expect": "226719" },
+  { "name": "code with an expiry clause", "text": "Code 774812 expires in 10 minutes.", "expect": "774812" },
+  { "name": "code alongside an account number", "text": "Your one-time passcode is 338291 for account ending in 4821.", "expect": "338291" },
+  { "name": "code alongside a currency amount", "text": "Verification code: 665003. Charge of $1200 pending.", "expect": "665003" },
+  { "name": "alphanumeric code", "text": "Your security code is A4F9K2", "expect": "A4F9K2" },
+  { "name": "code alongside a reference number", "text": "Wells Fargo: 291043 is your access code. Never share it. Ref 88213004", "expect": "291043" },
+  { "name": "code alongside a year", "text": "Copyright 2024. Your code is 5521.", "expect": "5521" },
+  { "name": "no code present", "text": "Your package will arrive tomorrow between 9:00 and 11:00.", "expect": null },
+  { "name": "bare unlabelled numbers are refused", "text": "123456 789012", "expect": null },
+  { "name": "OCR-mangled digits", "text": "Your verification code is 4B392O", "expect": "483920", "ocr": true },
+  { "name": "alphanumeric survives OCR mode", "text": "Your security code is A4F9K2", "expect": "A4F9K2", "ocr": true }
+]

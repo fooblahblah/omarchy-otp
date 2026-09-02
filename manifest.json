@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "fooblahblah.otp",
+  "name": "One-Time Codes",
+  "version": "0.1.0",
+  "author": "Jeff Simpson",
+  "license": "MIT",
+  "description": "Copy the 2FA code from your most recent notification, or from any region of the screen, with a hotkey",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
