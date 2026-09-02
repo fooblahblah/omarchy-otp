@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Print the newest persisted notifications as one JSON array, newest first,
+# keeping only the fields the passcode heuristic reads. Live popups sit directly
+# in the state directory; anything dismissed or expired is in history/.
+#
+# Everything here is bounded before it is buffered: how many files are looked
+# at, how many bytes of each are read, how many entries come out, and how long
+# each string can be. Filenames are handled as opaque bytes end to end, so a
+# name with spaces, tabs or newlines cannot break or widen the scan.
+#
+# Usage: otp-scan-notifications <state-dir> <entry-limit>
+
+set -uo pipefail
+exec 2>/dev/null
+
+dir=${1:?state dir}
+limit=${2:?entry limit}
+
+# Hard ceilings, independent of what the caller asks for.
+readonly MAX_FILES_PER_DIR=256   # glob results considered per directory
+readonly MAX_ENTRIES=64          # entries emitted, whatever $2 says
+readonly MAX_FILE_BYTES=65536    # bytes read from any one file
+readonly MAX_APP=64              # characters kept per field
+readonly MAX_SUMMARY=512
+readonly MAX_BODY=4096
+
+[[ $limit =~ ^[0-9]{1,3}$ ]] || limit=$MAX_ENTRIES
+(( limit > MAX_ENTRIES )) && limit=$MAX_ENTRIES
+(( limit < 1 )) && { echo "[]"; exit 0; }
+
+# One notification file → one compact JSON object, or nothing if the file is
+# not a JSON object. Strings are truncated by jq after parsing, so a huge
+# body costs at most MAX_FILE_BYTES of reading and never reaches the caller.
+filter='
+  select(type == "object")
+  | {
+      app: ((.app // "") | tostring | .[0:'"$MAX_APP"']),
+      summary: ((.summary // "") | tostring | .[0:'"$MAX_SUMMARY"']),
+      body: ((.body // "") | tostring | .[0:'"$MAX_BODY"']),
+      timestamp: (if (.timestamp | type) == "number" then .timestamp else 0 end)
+    }'
+
+shopt -s nullglob
+live=("$dir"/*.json)
+past=("$dir"/history/*.json)
+shopt -u nullglob
+candidates=("${live[@]:0:$MAX_FILES_PER_DIR}" "${past[@]:0:$MAX_FILES_PER_DIR}")
+
+if (( ${#candidates[@]} == 0 )); then
+  echo "[]"
+  exit 0
+fi
+
+# Newest first by mtime, NUL-delimited throughout. The mtime field never
+# contains a tab, so everything after the first tab is the path, tabs and all.
+files=()
+while IFS= read -r -d '' entry; do
+  files+=("${entry#*$'\t'}")
+done < <(
+  stat --printf '%.Y\t%n\0' -- "${candidates[@]}" \
+    | sort -z -t $'\t' -k1,1gr \
+    | head -z -n "$limit"
+)
+
+for file in "${files[@]}"; do
+  [[ -f $file ]] || continue
+  head -c "$MAX_FILE_BYTES" -- "$file" | jq -c "$filter"
+done | jq -s '.' || echo "[]"

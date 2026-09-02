@@ -3,18 +3,59 @@
 # Freeze the screen, let the user pick a region, and print whatever text OCR
 # finds there. Extraction is deliberately left to the plugin so there is only
 # one implementation of the passcode rules.
+#
+# The shell runs this under `timeout`, which owns the deadline and signals the
+# whole process group when it expires or is told to stop. Because the freeze
+# overlay is a background job, this script additionally tears down anything it
+# started itself on exit, whichever way it exits.
+#
+#   otp-capture-text              run the capture
+#   otp-capture-text --print-langs   print the OCR language list that would be used
 
 set -uo pipefail
+exec 2>/dev/null
 
-cleanup() { [[ -n ${PID:-} ]] && kill "$PID" 2>/dev/null; }
+readonly MAX_OUTPUT_BYTES=65536
+
+# Tesseract language lists look like "eng", "eng+deu" or "chi_sim+eng". Anything
+# else from the environment is discarded rather than handed to tesseract: the
+# value is user-controlled, must never start with "-", and must stay short.
+ocr_langs() {
+  local langs=${OMARCHY_OCR_LANGS:-eng}
+  if (( ${#langs} > 64 )) \
+    || [[ ! $langs =~ ^[a-z]{3}(_[A-Za-z]{1,12})?(\+[a-z]{3}(_[A-Za-z]{1,12})?){0,3}$ ]]; then
+    langs=eng
+  fi
+  printf '%s' "$langs"
+}
+
+if [[ ${1:-} == --print-langs ]]; then
+  ocr_langs
+  echo
+  exit 0
+fi
+
+freeze_pid=""
+cleanup() {
+  trap - EXIT TERM INT HUP
+  [[ -n $freeze_pid ]] && kill "$freeze_pid" 2>/dev/null
+  # Anything else still running under this script: slurp, grim, tesseract.
+  pkill -P $$ 2>/dev/null
+}
+trap 'cleanup; exit 143' TERM INT HUP
 trap cleanup EXIT
 
+# Keep hyprpicker alive until after grim captures so the screenshot sees the
+# frozen overlay rather than live content shifting during teardown.
 hyprpicker -r -z >/dev/null 2>&1 &
-PID=$!
+freeze_pid=$!
 sleep .1
 
-SELECTION=$(slurp 2>/dev/null) || exit 1
-[[ -n $SELECTION ]] || exit 1
+selection=$(slurp 2>/dev/null) || exit 1
+# slurp prints "<x>,<y> <w>x<h>"; anything else is not a geometry grim should see.
+[[ $selection =~ ^-?[0-9]{1,6},-?[0-9]{1,6}\ [0-9]{1,6}x[0-9]{1,6}$ ]] || exit 1
 
-grim -g "$SELECTION" - 2>/dev/null | tesseract stdin stdout --oem 1 --psm 6 \
-  -l "${OMARCHY_OCR_LANGS:-eng}" --dpi 300 -c preserve_interword_spaces=1 2>/dev/null
+grim -g "$selection" - 2>/dev/null \
+  | tesseract stdin stdout --oem 1 --psm 6 -l "$(ocr_langs)" --dpi 300 \
+      -c preserve_interword_spaces=1 2>/dev/null \
+  | head -c "$MAX_OUTPUT_BYTES"

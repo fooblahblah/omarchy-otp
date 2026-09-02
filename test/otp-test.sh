@@ -33,6 +33,19 @@ assertEqual(picked.app, 'Beeper', 'otp reports which app carried the code')
 const none = otp.extractFromNotifications([{ app: 'kitty', summary: 'Build', body: 'done' }])
 assertEqual(none.status, 'none', 'otp reports nothing when no notification carries a code')
 
+// Nothing past the ceilings is looked at, so a hostile text costs a bounded
+// amount of work and cannot push a real code out with decoys.
+const padding = 'y'.repeat(otp.MAX_TEXT_LENGTH)
+assertEqual(otp.extract(padding + ' code 123456').status, 'none', 'otp ignores text beyond MAX_TEXT_LENGTH')
+
+const flood = Array.from({ length: otp.MAX_CANDIDATES * 2 }, (_, i) => String(100000 + i)).join(' ')
+assert(otp.candidates(flood).length <= otp.MAX_CANDIDATES, 'otp considers at most MAX_CANDIDATES matches')
+
+const filler = Array.from({ length: otp.MAX_ENTRIES }, () => ({ app: 'x', summary: 'Build', body: 'done' }))
+const late = otp.extractFromNotifications(filler.concat([{ app: 'late', body: 'code 654321' }]))
+assertEqual(late.status, 'none', 'otp reads at most MAX_ENTRIES notifications')
+assertEqual(otp.extract(null).status, 'none', 'otp treats a missing text as empty')
+
 // The QML engine has no lookbehind; keep it out of the source entirely.
 const source = fs.readFileSync(path.join(root, 'OtpLogic.js'), 'utf8')
 assert(!source.includes('(?<'), 'OtpLogic.js avoids lookbehind and named groups the QML engine rejects')

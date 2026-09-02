@@ -5,6 +5,11 @@
 // and no daemon: it reads those files when the hotkey fires, finds the newest
 // notification carrying a passcode, and puts it on the clipboard. Nothing is
 // copied until asked for, which keeps codes out of clipboard history.
+//
+// Every helper runs under timeout(1): it owns the deadline, and when the shell
+// stops a Process (or the deadline passes) it signals the helper's whole
+// process group, so hyprpicker, slurp, grim, tesseract and jq never outlive
+// the hotkey that started them. A Timer per helper backs that up from this side.
 
 import QtQuick
 import Quickshell
@@ -24,14 +29,30 @@ Item {
   // work long after the toast has gone.
   readonly property string notificationDir: home + "/.local/state/omarchy/notifications/"
   // The notifications plugin keeps 10 history entries, so scanning further is
-  // wasted work.
+  // wasted work. The scan script enforces its own ceilings on top of this.
   readonly property int scanLimit: 20
+
+  // Deadlines, in seconds. The scan is disk and jq only. OCR includes the user
+  // drawing a selection, so it gets long enough to not feel rushed.
+  readonly property int scanDeadline: 10
+  readonly property int ocrDeadline: 90
+  readonly property int helperDeadline: 5
+  // Anything a helper prints beyond this is treated as no output at all; the
+  // scripts cap themselves well below it.
+  readonly property int maxOutputChars: 262144
 
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
 
-  // Toasts never show the code itself. The clipboard is the delivery mechanism;
-  // printing the digits would persist them into notification history for the
-  // OCR path, which otherwise never touches disk.
+  // timeout(1) sends SIGTERM to the helper's process group at the deadline or
+  // when it is itself told to stop, then SIGKILL two seconds later for anything
+  // that ignored it.
+  function withDeadline(seconds, argv) {
+    return ["timeout", "-k", "2", String(seconds)].concat(argv)
+  }
+
+  // Toasts never show the code itself, nor any candidate for it. The clipboard
+  // is the delivery mechanism; printing digits would persist them into
+  // notification history, which for the OCR path otherwise never touches disk.
   function maskOf(code) {
     var out = ""
     for (var i = 0; i < code.length; i++) out += "•"
@@ -39,13 +60,17 @@ Item {
   }
 
   function notify(headline, description, glyph) {
-    notifyProc.command = ["omarchy-notification-send", "--app-name", "otp",
-                          "-g", glyph || "󰯄", "-t", "4000", headline, description || ""]
+    notifyProc.command = withDeadline(helperDeadline,
+      ["omarchy-notification-send", "--app-name", "otp",
+       "-g", glyph || "󰯄", "-t", "4000", headline, description || ""])
     notifyProc.running = true
   }
 
+  // The code goes to wl-copy over stdin, never argv, so it is not visible in
+  // the process table for the moment wl-copy runs.
   function deliver(code, source) {
-    copyProc.command = ["wl-copy", code]
+    copyProc.pending = code
+    copyProc.stdinEnabled = true
     copyProc.running = true
     notify("Copied 2FA code", maskOf(code) + " · from " + source, "󰅍")
   }
@@ -56,9 +81,8 @@ Item {
       return
     }
     if (result.status === "ambiguous") {
-      var codes = []
-      for (var i = 0; i < result.candidates.length; i++) codes.push(result.candidates[i].code)
-      notify("Ambiguous code", "Candidates: " + codes.join(", ") + " — nothing copied.", "󰀦")
+      notify("Ambiguous code", result.candidates.length + " numbers scored alike in "
+        + (result.app ? result.app : source) + " — nothing copied.", "󰀦")
       return
     }
     notify("No code found", source === "OCR"
@@ -66,45 +90,124 @@ Item {
       : "No recent notification carried a passcode.", "󰀦")
   }
 
+  // stdout and the exit code arrive as separate signals in no guaranteed
+  // order, so each helper records both and acts once it has the pair.
+  function bounded(text) {
+    var out = String(text || "")
+    return out.length > maxOutputChars ? "" : out
+  }
+
   // Newest first, across live popups and history, as a single JSON array.
   Process {
     id: scanProc
-    command: ["bash", "-c",
-      'd="$1"; limit="$2"; ' +
-      'files=$(ls -t "$d"*.json "$d"history/*.json 2>/dev/null | head -"$limit"); ' +
-      '[ -z "$files" ] && { echo "[]"; exit 0; }; ' +
-      'printf "%s\\n" "$files" | tr "\\n" "\\0" | ' +
-      'xargs -0 -r jq -s "[.[] | {app, summary, body, timestamp}]" 2>/dev/null || echo "[]"',
-      "bash", service.notificationDir, String(service.scanLimit)]
+    property int exitCode: -1
+    property var output: null
+
+    command: service.withDeadline(service.scanDeadline,
+      [service.pluginDir + "otp-scan-notifications", service.notificationDir, String(service.scanLimit)])
     stdout: StdioCollector {
       onStreamFinished: {
-        var entries = []
-        try {
-          entries = JSON.parse(String(text || "[]"))
-        } catch (e) {
-          entries = []
-        }
-        service.report(OtpLogic.extractFromNotifications(entries, false), "notifications")
+        scanProc.output = service.bounded(text)
+        scanProc.settle()
       }
+    }
+    onStarted: {
+      exitCode = -1
+      output = null
+      scanWatchdog.restart()
+    }
+    onExited: (code, status) => {
+      scanWatchdog.stop()
+      exitCode = status === 0 ? code : 255
+      settle()
+    }
+
+    function settle() {
+      if (exitCode < 0 || output === null) return
+      if (exitCode === 124) {
+        service.notify("Timed out", "Reading notifications took too long.", "󰀦")
+        return
+      }
+      var entries = []
+      try {
+        entries = JSON.parse(exitCode === 0 ? output : "[]")
+      } catch (e) {
+        entries = []
+      }
+      if (!Array.isArray(entries)) entries = []
+      service.report(OtpLogic.extractFromNotifications(entries, false), "notifications")
     }
   }
 
   Process {
     id: ocrProc
-    command: [service.pluginDir + "otp-capture-text"]
+    property int exitCode: -1
+    property var output: null
+
+    command: service.withDeadline(service.ocrDeadline, [service.pluginDir + "otp-capture-text"])
     stdout: StdioCollector {
       onStreamFinished: {
-        var captured = String(text || "").trim()
-        if (captured === "") {
-          service.notify("No text found", "OCR read nothing in that region.", "󰀦")
-          return
-        }
-        service.report(OtpLogic.extract(captured, true), "OCR")
+        ocrProc.output = service.bounded(text)
+        ocrProc.settle()
       }
+    }
+    onStarted: {
+      exitCode = -1
+      output = null
+      ocrWatchdog.restart()
+    }
+    onExited: (code, status) => {
+      ocrWatchdog.stop()
+      exitCode = status === 0 ? code : 255
+      settle()
+    }
+
+    function settle() {
+      if (exitCode < 0 || output === null) return
+      // 1 is slurp cancelled: the user changed their mind, so say nothing.
+      if (exitCode === 1) return
+      if (exitCode === 124) {
+        service.notify("Timed out", "The selection was not finished in time.", "󰀦")
+        return
+      }
+      if (exitCode !== 0) {
+        service.notify("OCR failed", "Couldn't capture or read that region.", "󰀦")
+        return
+      }
+      var captured = output.trim()
+      if (captured === "") {
+        service.notify("No text found", "OCR read nothing in that region.", "󰀦")
+        return
+      }
+      service.report(OtpLogic.extract(captured, true), "OCR")
     }
   }
 
-  Process { id: copyProc }
+  // Backstops for the deadlines timeout(1) already enforces: stopping the
+  // Process sends SIGTERM to timeout, which forwards it to the whole group.
+  Timer {
+    id: scanWatchdog
+    interval: (service.scanDeadline + 5) * 1000
+    onTriggered: scanProc.running = false
+  }
+  Timer {
+    id: ocrWatchdog
+    interval: (service.ocrDeadline + 5) * 1000
+    onTriggered: ocrProc.running = false
+  }
+
+  Process {
+    id: copyProc
+    property string pending: ""
+    command: service.withDeadline(service.helperDeadline, ["wl-copy", "--sensitive"])
+    onStarted: {
+      write(pending)
+      pending = ""
+      // Closing stdin is what tells wl-copy the content is complete.
+      stdinEnabled = false
+    }
+  }
+
   Process { id: notifyProc }
 
   IpcHandler {

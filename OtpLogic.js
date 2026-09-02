@@ -25,6 +25,13 @@ var DECOY_SOURCE =
 // Length preferences: six digits is overwhelmingly the common shape.
 var LENGTH_BONUS = { 4: 1.5, 5: 0.5, 6: 3, 7: 0.5, 8: 1 }
 
+// Ceilings on what one call will look at. Anything past them is ignored
+// rather than scanned: a passcode lives in the first few hundred characters of
+// a message, and a text with hundreds of number-shaped tokens is not one.
+var MAX_TEXT_LENGTH = 4096
+var MAX_CANDIDATES = 64
+var MAX_ENTRIES = 64
+
 // Conservative OCR confusions, applied only to otherwise-numeric tokens and
 // only when the caller says the text came from OCR.
 var OCR_CONFUSIONS = { "O": "0", "o": "0", "I": "1", "l": "1", "|": "1", "S": "5", "B": "8", "Z": "2" }
@@ -149,11 +156,13 @@ function scoreCandidate(text, code, start, end, context, repaired) {
 }
 
 // Walk one pattern, where group 1 absorbs the character before the candidate
-// (standing in for a lookbehind) and `group` names the candidate itself.
-function eachMatch(text, pattern, group, handler) {
+// (standing in for a lookbehind) and `group` names the candidate itself. The
+// walk stops once `budget` says enough matches have been considered.
+function eachMatch(text, pattern, group, budget, handler) {
   var re = new RegExp(pattern, "g")
   var match
-  while ((match = re.exec(text)) !== null) {
+  while (budget.left > 0 && (match = re.exec(text)) !== null) {
+    budget.left--
     var value = match[group]
     var start = match.index + match[1].length
     handler(value, start, start + value.length)
@@ -162,9 +171,12 @@ function eachMatch(text, pattern, group, handler) {
 }
 
 function candidates(text, ocr) {
-  var normalized = String(text === undefined || text === null ? "" : text).replace(/[ \t]+/g, " ")
+  var normalized = String(text === undefined || text === null ? "" : text)
+    .slice(0, MAX_TEXT_LENGTH)
+    .replace(/[ \t]+/g, " ")
   var context = { phones: phoneSpans(normalized), times: timeSpans(normalized) }
   var found = {}
+  var budget = { left: MAX_CANDIDATES }
 
   function add(code, start, end, bonus, repaired) {
     var scored = scoreCandidate(normalized, code, start, end, context, repaired)
@@ -177,13 +189,13 @@ function candidates(text, ocr) {
 
   // Google's "G-123456" and Apple's "#123456" are explicit autofill
   // conventions -- about as unambiguous as a passcode gets.
-  eachMatch(normalized, "(^|[^0-9A-Za-z])(?:G-|#)([0-9]{4,8})(?![0-9A-Za-z])", 2,
+  eachMatch(normalized, "(^|[^0-9A-Za-z])(?:G-|#)([0-9]{4,8})(?![0-9A-Za-z])", 2, budget,
     function (code, start, end) { add(code, start, end, 6, false) })
 
-  eachMatch(normalized, "(^|[^0-9A-Za-z])([0-9]{4,8})(?![0-9A-Za-z])", 2,
+  eachMatch(normalized, "(^|[^0-9A-Za-z])([0-9]{4,8})(?![0-9A-Za-z])", 2, budget,
     function (code, start, end) { add(code, start, end, 0, false) })
 
-  eachMatch(normalized, "(^|[^0-9A-Za-z])([A-Z0-9]{6,8})(?![0-9A-Za-z])", 2,
+  eachMatch(normalized, "(^|[^0-9A-Za-z])([A-Z0-9]{6,8})(?![0-9A-Za-z])", 2, budget,
     function (token, start, end) {
       var digitCount = token.replace(/[^0-9]/g, "").length
       if (digitCount < 2 || isDigits(token)) return
@@ -221,7 +233,8 @@ function extract(text, ocr) {
 // persisted notification records, newest first.
 function extractFromNotifications(entries, ocr) {
   if (!entries || !entries.length) return { status: "none", code: "", candidates: [] }
-  for (var i = 0; i < entries.length; i++) {
+  var count = Math.min(entries.length, MAX_ENTRIES)
+  for (var i = 0; i < count; i++) {
     var entry = entries[i] || {}
     var text = String(entry.summary || "") + "\n" + String(entry.body || "")
     var result = extract(text, ocr)
@@ -245,6 +258,9 @@ if (typeof module !== "undefined") {
     extract: extract,
     extractFromNotifications: extractFromNotifications,
     repairOcr: repairOcr,
-    phoneSpans: phoneSpans
+    phoneSpans: phoneSpans,
+    MAX_TEXT_LENGTH: MAX_TEXT_LENGTH,
+    MAX_CANDIDATES: MAX_CANDIDATES,
+    MAX_ENTRIES: MAX_ENTRIES
   }
 }
