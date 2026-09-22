@@ -18,7 +18,7 @@ dir=${1:?state dir}
 limit=${2:?entry limit}
 
 # Hard ceilings, independent of what the caller asks for.
-readonly MAX_FILES_PER_DIR=256   # glob results considered per directory
+readonly MAX_FILES_PER_DIR=256   # names enumerated per directory
 readonly MAX_ENTRIES=64          # entries emitted, whatever $2 says
 readonly MAX_FILE_BYTES=65536    # bytes read from any one file
 readonly MAX_APP=64              # characters kept per field
@@ -41,27 +41,34 @@ filter='
       timestamp: (if (.timestamp | type) == "number" then .timestamp else 0 end)
     }'
 
-shopt -s nullglob
-live=("$dir"/*.json)
-past=("$dir"/history/*.json)
-shopt -u nullglob
-candidates=("${live[@]:0:$MAX_FILES_PER_DIR}" "${past[@]:0:$MAX_FILES_PER_DIR}")
+# At most MAX_FILES_PER_DIR names from one directory, each prefixed with its
+# mtime. find hands over one entry at a time and dies of SIGPIPE as soon as head
+# has taken its share, so a directory holding a million notifications costs the
+# ceiling and not the directory: no complete list of names is built anywhere,
+# neither by a glob nor in an array. Symlinks are listed and resolved below,
+# exactly as the glob used to leave them.
+enumerate() {
+  find "$1" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -name '*.json' \
+    -printf '%T@\t%p\0' \
+    | head -z -n "$MAX_FILES_PER_DIR"
+}
 
-if (( ${#candidates[@]} == 0 )); then
-  echo "[]"
-  exit 0
-fi
-
-# Newest first by mtime, NUL-delimited throughout. The mtime field never
-# contains a tab, so everything after the first tab is the path, tabs and all.
+# Newest first by mtime, NUL-delimited throughout, sorting only the bounded set
+# the two producers hand over. The mtime field never contains a tab, so
+# everything after the first tab is the path, tabs and all.
 files=()
 while IFS= read -r -d '' entry; do
   files+=("${entry#*$'\t'}")
 done < <(
-  stat --printf '%.Y\t%n\0' -- "${candidates[@]}" \
+  { enumerate "$dir"; enumerate "$dir/history"; } \
     | sort -z -t $'\t' -k1,1gr \
     | head -z -n "$limit"
 )
+
+if (( ${#files[@]} == 0 )); then
+  echo "[]"
+  exit 0
+fi
 
 for file in "${files[@]}"; do
   [[ -f $file ]] || continue

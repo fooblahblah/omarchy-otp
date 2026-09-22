@@ -85,10 +85,19 @@ empty=$("$SCAN" "$WORK/missing/" 20)
 [[ $empty == "[]" ]] || fail "scan prints [] for a missing directory" "$empty"
 pass "scan prints [] for a missing directory"
 
-# Enumeration is capped per directory before anything is stat'ed or sorted.
+# Enumeration is capped per directory as the names are produced, rather than
+# by slicing a list that was materialized in full first.
 flood="$WORK/flood/"
 mkdir -p "$flood/history"
 for i in $(seq 1 300); do printf '{"app":"n%d","body":"b"}' "$i" > "$flood/$i.json"; done
 flooded=$("$SCAN" "$flood" 64 | jq 'length')
 [[ $flooded == 64 ]] || fail "scan caps entries at 64 even with hundreds of files" "got $flooded"
 pass "scan caps entries at 64 even with hundreds of files"
+
+# The ceiling is per directory, so a flooded live directory cannot spend
+# history's share of it and hide a newer entry sitting there.
+touch -d "2025-01-01 00:00:00" -- "$flood"/*.json
+write_note "$flood/history/fresh.json" "fresh" "code 123456" "2026-06-01 00:00:00"
+lead=$("$SCAN" "$flood" 64 | jq -r '.[0].app')
+[[ $lead == "fresh" ]] || fail "scan keeps a separate ceiling for each directory" "got $lead"
+pass "scan keeps a separate ceiling for each directory"
