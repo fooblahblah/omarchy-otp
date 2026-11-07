@@ -33,6 +33,20 @@ assertEqual(picked.app, 'Beeper', 'otp reports which app carried the code')
 const none = otp.extractFromNotifications([{ app: 'kitty', summary: 'Build', body: 'done' }])
 assertEqual(none.status, 'none', 'otp reports nothing when no notification carries a code')
 
+// Every notification is a candidate as it arrives, so a stray number in an
+// unrelated one must not be taken for a code -- it would replace the real one.
+const stray = otp.extractFromNotifications([{ app: 'kitty', summary: 'kitty', body: 'Build finished in 4521 ms' }])
+assertEqual(stray.status, 'none', 'otp ignores an unlabelled number in a notification')
+
+const inside = otp.extractFromNotifications([{ app: 'x', summary: 'Build', body: 'decode failed after 2041 ms, shipping 7781' }])
+assertEqual(inside.status, 'none', 'otp does not read keywords inside other words')
+
+const conventions = otp.extractFromNotifications([{ app: 'Messages', summary: 'Apple', body: '#913472' }])
+assertEqual(conventions.code, '913472', 'otp treats the autofill forms as labelled')
+
+// A region picked for OCR already says where the code is.
+assertEqual(otp.extract('483920', true).code, '483920', 'otp accepts a bare number from an OCR region')
+
 // Nothing past the ceilings is looked at, so a hostile text costs a bounded
 // amount of work and cannot push a real code out with decoys.
 const padding = 'y'.repeat(otp.MAX_TEXT_LENGTH)

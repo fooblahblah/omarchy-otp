@@ -129,6 +129,12 @@ number, a time, a currency amount, or next to words like *account ending in*.
 On the OCR path only, digit-shaped tokens are repaired for common confusions
 (`O`→`0`, `l`→`1`, `S`→`5`).
 
+From notifications, a number only counts when one of those keywords sits next
+to it or it uses an autofill form. Every notification is looked at as it
+arrives, so "Build finished in 4521 ms" must not replace the code that came a
+minute earlier. A region picked for OCR is taken as already saying where the
+code is, so a bare number there is accepted.
+
 Toasts show the code masked. The clipboard is the delivery mechanism, and
 printing the digits would put them in the notification list.
 

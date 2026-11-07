@@ -11,8 +11,10 @@
 // for lookbehind, and matches are walked with an exec loop. test/qml-engine-test.sh
 // guards that, since Node alone would happily accept syntax the shell rejects.
 
+// Anchored to the start of a word, so "decode", "barcode", "shipping" and
+// "hotpot" do not read as code, pin and otp.
 var KEYWORD_SOURCE =
-  "(one[- ]?time|verification|verify|security|access|login|log[- ]?in|" +
+  "\\b(one[- ]?time|verification|verify|security|access|login|log[- ]?in|" +
   "auth(?:entication)?|confirm(?:ation)?|passcode|pass ?code|otp|pin|" +
   "code|token|2fa|mfa)"
 
@@ -109,7 +111,8 @@ function scoreCandidate(text, code, start, end, context, repaired) {
     score += 4
     reasons.push("keyword after")
   }
-  if (gap < 0 && !keywordAfter) {
+  var labelled = gap >= 0 || keywordAfter
+  if (!labelled) {
     score -= 1
     reasons.push("no keyword")
   }
@@ -152,7 +155,7 @@ function scoreCandidate(text, code, start, end, context, repaired) {
     }
   }
 
-  return { score: Math.round(score * 100) / 100, reasons: reasons }
+  return { score: Math.round(score * 100) / 100, reasons: reasons, labelled: labelled }
 }
 
 // Walk one pattern, where group 1 absorbs the character before the candidate
@@ -178,19 +181,21 @@ function candidates(text, ocr) {
   var found = {}
   var budget = { left: MAX_CANDIDATES }
 
-  function add(code, start, end, bonus, repaired) {
+  // `convention` marks the autofill forms, which label themselves.
+  function add(code, start, end, bonus, repaired, convention) {
     var scored = scoreCandidate(normalized, code, start, end, context, repaired)
     var total = Math.round((scored.score + (bonus || 0)) * 100) / 100
     var existing = found[code]
     if (existing === undefined || total > existing.score) {
-      found[code] = { code: code, score: total, reasons: scored.reasons }
+      found[code] = { code: code, score: total, reasons: scored.reasons,
+                      labelled: scored.labelled || convention === true }
     }
   }
 
   // Google's "G-123456" and Apple's "#123456" are explicit autofill
   // conventions -- about as unambiguous as a passcode gets.
   eachMatch(normalized, "(^|[^0-9A-Za-z])(?:G-|#)([0-9]{4,8})(?![0-9A-Za-z])", 2, budget,
-    function (code, start, end) { add(code, start, end, 6, false) })
+    function (code, start, end) { add(code, start, end, 6, false, true) })
 
   eachMatch(normalized, "(^|[^0-9A-Za-z])([0-9]{4,8})(?![0-9A-Za-z])", 2, budget,
     function (code, start, end) { add(code, start, end, 0, false) })
@@ -220,8 +225,16 @@ function candidates(text, ocr) {
 // Returns { status: "ok"|"ambiguous"|"none", code, candidates }.
 // "ambiguous" means the top two scores are within a point of each other; the
 // caller should ask rather than copy.
-function extract(text, ocr) {
-  var ranked = candidates(text, ocr).filter(function (entry) { return entry.score > 0 })
+//
+// With `labelledOnly`, a number counts only when a passcode keyword sits near
+// it or it uses an autofill form. Notifications need that: every one that
+// arrives is a candidate, and "Build finished in 4521 ms" must not displace
+// the code that came a minute earlier. A region picked for OCR does not, since
+// choosing it already says where the code is.
+function extract(text, ocr, labelledOnly) {
+  var ranked = candidates(text, ocr).filter(function (entry) {
+    return entry.score > 0 && (!labelledOnly || entry.labelled)
+  })
   if (ranked.length === 0) return { status: "none", code: "", candidates: [] }
   if (ranked.length > 1 && ranked[0].score - ranked[1].score < 2) {
     return { status: "ambiguous", code: "", candidates: ranked.slice(0, 3) }
@@ -237,7 +250,7 @@ function extractFromNotifications(entries, ocr) {
   for (var i = 0; i < count; i++) {
     var entry = entries[i] || {}
     var text = String(entry.summary || "") + "\n" + String(entry.body || "")
-    var result = extract(text, ocr)
+    var result = extract(text, ocr, true)
     if (result.status === "ok") {
       result.app = String(entry.app || "")
       result.timestamp = entry.timestamp || 0
