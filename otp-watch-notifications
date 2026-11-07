@@ -19,6 +19,16 @@
 set -uo pipefail
 exec 2>/dev/null
 
+# Each process here is told to exit when its parent does (PR_SET_PDEATHSIG,
+# which survives exec but not fork). If the shell or timeout(1) is killed
+# outright, with no chance to signal the group, the chain still unwinds at once
+# instead of leaving busctl reading notifications until its next write fails.
+# setpriv is called directly in the pipeline, never through a function, so
+# bash execs it in place and busctl and jq stay direct children of this script.
+if [[ ${1:-} != --filter && ${OTP_WATCH_TIED:-} != 1 ]]; then
+  OTP_WATCH_TIED=1 exec setpriv --pdeathsig TERM -- "$0" "$@"
+fi
+
 readonly MAX_APP=64
 readonly MAX_SUMMARY=512
 readonly MAX_BODY=4096
@@ -41,6 +51,6 @@ if [[ ${1:-} == --filter ]]; then
   exec jq -R -c --unbuffered "$filter"
 fi
 
-busctl --user monitor --json=short \
+setpriv --pdeathsig TERM -- busctl --user monitor --json=short \
   --match "type='method_call',interface='org.freedesktop.Notifications',member='Notify'" \
-  | jq -R -c --unbuffered "$filter"
+  | setpriv --pdeathsig TERM -- jq -R -c --unbuffered "$filter"

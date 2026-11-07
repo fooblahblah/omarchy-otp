@@ -154,7 +154,10 @@ Item {
     property real startedAt: 0
     property int retryDelay: 1000
 
-    command: service.withDeadline(0, [service.pluginDir + "otp-watch-notifications"])
+    // setpriv ties timeout(1) to the shell: if the shell dies without stopping
+    // it, timeout gets SIGTERM and takes the watcher's group down with it.
+    command: ["setpriv", "--pdeathsig", "TERM", "--"]
+      .concat(service.withDeadline(0, [service.pluginDir + "otp-watch-notifications"]))
     running: true
     stdout: SplitParser {
       onRead: data => service.observe(data)

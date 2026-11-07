@@ -45,8 +45,10 @@ memory → clipboard.
   including the time you take to draw the selection — and escalates to
   `SIGKILL` two seconds later. So the watcher's `busctl` and `jq` never outlive
   the plugin, and `hyprpicker`, `slurp`, `grim` and `tesseract` never outlive
-  the hotkey that started them. If the watcher exits it is restarted, backing
-  off to once a minute.
+  the hotkey that started them. Each of the watcher's processes is also set to
+  receive `SIGTERM` when its parent dies (`setpriv --pdeathsig`), so it goes
+  down even if the shell is killed outright. If the watcher exits it is
+  restarted, backing off to once a minute.
 - What reaches the shell is bounded: 64 characters of app name, 512 of title
   and 4096 of body per notification, 64 candidate numbers considered per text,
   64 KiB of OCR output. A single bus message is bounded by the bus itself, and
@@ -84,6 +86,7 @@ OCR chain.
 | `wl-copy` | `wl-clipboard` | Putting the code on the clipboard |
 | `timeout`, `head` | `coreutils` | Process-group teardown and bounded reads |
 | `pkill` | `procps-ng` | Tearing down the OCR helpers |
+| `setpriv` | `util-linux` | Tying the watcher's processes to the shell's lifetime |
 | `hyprpicker`, `slurp`, `grim`, `tesseract` | same names, `tesseract` | The OCR path only (`copyRegion`) |
 
 Set `OMARCHY_OCR_LANGS` (for example `deu+eng`) to OCR in a language other than
