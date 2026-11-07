@@ -229,8 +229,8 @@ function extract(text, ocr) {
   return { status: "ok", code: ranked[0].code, candidates: ranked }
 }
 
-// Pick the newest notification that carries a code. `entries` are the shell's
-// persisted notification records, newest first.
+// Pick the newest notification that carries a code. `entries` are
+// notification records ({ app, summary, body }), newest first.
 function extractFromNotifications(entries, ocr) {
   if (!entries || !entries.length) return { status: "none", code: "", candidates: [] }
   var count = Math.min(entries.length, MAX_ENTRIES)

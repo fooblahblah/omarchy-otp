@@ -1,15 +1,17 @@
 // One-time passcode service for the Omarchy shell.
 //
-// The shell already is the notification server, and the notifications plugin
-// persists every notification as JSON on disk. So this plugin needs no watcher
-// and no daemon: it reads those files when the hotkey fires, finds the newest
-// notification carrying a passcode, and puts it on the clipboard. Nothing is
-// copied until asked for, which keeps codes out of clipboard history.
+// Every notification is a Notify call on the session bus. A small helper
+// watches those calls and hands this service each one's app, title and body;
+// the service runs the heuristic on arrival and keeps the newest passcode in
+// memory for ten minutes. The hotkey copies that. Nothing is copied until
+// asked for, which keeps codes out of clipboard history, and nothing is ever
+// written to disk -- the shell itself redacts passcodes from what it persists,
+// so there is nothing to read back afterwards anyway.
 //
-// Every helper runs under timeout(1): it owns the deadline, and when the shell
-// stops a Process (or the deadline passes) it signals the helper's whole
-// process group, so hyprpicker, slurp, grim, tesseract and jq never outlive
-// the hotkey that started them. A Timer per helper backs that up from this side.
+// Every helper runs under timeout(1): when the shell stops a Process (or a
+// deadline passes) it signals the helper's whole process group, so busctl,
+// hyprpicker, slurp, grim, tesseract and jq never outlive this service or the
+// hotkey that started them. A Timer per short-lived helper backs that up.
 
 import QtQuick
 import Quickshell
@@ -23,36 +25,39 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string home: Quickshell.env("HOME")
-  // Live popups sit directly in this directory; anything dismissed, expired or
-  // acted upon is moved into history/. Reading both is what makes the hotkey
-  // work long after the toast has gone.
-  readonly property string notificationDir: home + "/.local/state/omarchy/notifications/"
-  // The notifications plugin keeps 10 history entries, so scanning further is
-  // wasted work. The scan script enforces its own ceilings on top of this.
-  readonly property int scanLimit: 20
+  // How long a passcode stays copyable after its notification arrived. Codes
+  // themselves rarely live longer, and anything older is more likely to be the
+  // wrong number than the one you are waiting for.
+  readonly property int codeLifetime: 10 * 60 * 1000
 
-  // Deadlines, in seconds. The scan is disk and jq only. OCR includes the user
-  // drawing a selection, so it gets long enough to not feel rushed.
-  readonly property int scanDeadline: 10
+  // The newest notification that carried a passcode (or two numbers too close
+  // to call), as OtpLogic reports it, stamped with when it arrived. Memory only.
+  property var held: null
+
+  // Deadlines, in seconds. OCR includes the user drawing a selection, so it
+  // gets long enough to not feel rushed.
   readonly property int ocrDeadline: 90
   readonly property int helperDeadline: 5
   // Anything a helper prints beyond this is treated as no output at all; the
   // scripts cap themselves well below it.
   readonly property int maxOutputChars: 262144
+  // The watcher prints one short line per notification (its fields are capped
+  // at 64 + 512 + 4096 characters), so anything much longer is not from it.
+  readonly property int maxLineChars: 16384
 
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
 
   // timeout(1) sends SIGTERM to the helper's process group at the deadline or
   // when it is itself told to stop, then SIGKILL two seconds later for anything
-  // that ignored it.
+  // that ignored it. A deadline of 0 means none: the watcher runs until stopped,
+  // and timeout(1) is there only for its process-group teardown.
   function withDeadline(seconds, argv) {
     return ["timeout", "-k", "2", String(seconds)].concat(argv)
   }
 
   // Toasts never show the code itself, nor any candidate for it. The clipboard
-  // is the delivery mechanism; printing digits would persist them into
-  // notification history, which for the OCR path otherwise never touches disk.
+  // is the delivery mechanism; printing digits would put them on screen and in
+  // the notification list, which otherwise never hold them.
   function maskOf(code) {
     var out = ""
     for (var i = 0; i < code.length; i++) out += "•"
@@ -87,7 +92,7 @@ Item {
     }
     notify("No code found", source === "OCR"
       ? "Couldn't spot a passcode in that region."
-      : "No recent notification carried a passcode.", "󰀦")
+      : "No notification in the last 10 minutes carried a passcode.", "󰀦")
   }
 
   // stdout and the exit code arrive as separate signals in no guaranteed
@@ -97,46 +102,76 @@ Item {
     return out.length > maxOutputChars ? "" : out
   }
 
-  // Newest first, across live popups and history, as a single JSON array.
+  // One notification from the watcher: run the heuristic now, while the text
+  // exists, and remember the result if it found anything. The plugin's own
+  // toasts are skipped; they carry only a masked code, but they are not news.
+  function observe(line) {
+    var text = String(line || "")
+    if (!text || text.length > maxLineChars) return
+    var entry = null
+    try {
+      entry = JSON.parse(text)
+    } catch (e) {
+      return
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return
+    if (String(entry.app || "") === "otp") return
+    var result = OtpLogic.extractFromNotifications([entry], false)
+    if (result.status === "none") return
+    result.timestamp = Date.now()
+    held = result
+    forget.restart()
+  }
+
+  function copyHeld() {
+    var current = held
+    // Checked against the clock as well as by the timer, since a timer does
+    // not count time spent suspended.
+    if (current && Date.now() - current.timestamp <= codeLifetime) {
+      report(current, "notifications")
+      return
+    }
+    held = null
+    if (!watchProc.running) {
+      notify("Not watching notifications", "The notification watcher isn't running, so no code was seen.", "󰀦")
+      return
+    }
+    report({ status: "none" }, "notifications")
+  }
+
+  // Drop a passcode from memory once it is too old to copy.
+  Timer {
+    id: forget
+    interval: service.codeLifetime
+    onTriggered: service.held = null
+  }
+
+  // The watcher runs for as long as this service is loaded. If it exits, it
+  // is restarted after a pause that doubles each time it dies young, so a
+  // missing busctl costs a retry a minute rather than a busy loop.
   Process {
-    id: scanProc
-    property int exitCode: -1
-    property var output: null
+    id: watchProc
+    property real startedAt: 0
+    property int retryDelay: 1000
 
-    command: service.withDeadline(service.scanDeadline,
-      [service.pluginDir + "otp-scan-notifications", service.notificationDir, String(service.scanLimit)])
-    stdout: StdioCollector {
-      onStreamFinished: {
-        scanProc.output = service.bounded(text)
-        scanProc.settle()
-      }
+    command: service.withDeadline(0, [service.pluginDir + "otp-watch-notifications"])
+    running: true
+    stdout: SplitParser {
+      onRead: data => service.observe(data)
     }
-    onStarted: {
-      exitCode = -1
-      output = null
-      scanWatchdog.restart()
-    }
+    onStarted: startedAt = Date.now()
     onExited: (code, status) => {
-      scanWatchdog.stop()
-      exitCode = status === 0 ? code : 255
-      settle()
+      if (Date.now() - startedAt > 60000) retryDelay = 1000
+      console.warn("otp: notification watcher exited (" + code + "), restarting in " + retryDelay + " ms")
+      watchRestart.interval = retryDelay
+      watchRestart.start()
+      retryDelay = Math.min(retryDelay * 2, 60000)
     }
+  }
 
-    function settle() {
-      if (exitCode < 0 || output === null) return
-      if (exitCode === 124) {
-        service.notify("Timed out", "Reading notifications took too long.", "󰀦")
-        return
-      }
-      var entries = []
-      try {
-        entries = JSON.parse(exitCode === 0 ? output : "[]")
-      } catch (e) {
-        entries = []
-      }
-      if (!Array.isArray(entries)) entries = []
-      service.report(OtpLogic.extractFromNotifications(entries, false), "notifications")
-    }
+  Timer {
+    id: watchRestart
+    onTriggered: watchProc.running = true
   }
 
   Process {
@@ -183,13 +218,8 @@ Item {
     }
   }
 
-  // Backstops for the deadlines timeout(1) already enforces: stopping the
+  // Backstop for the deadline timeout(1) already enforces: stopping the
   // Process sends SIGTERM to timeout, which forwards it to the whole group.
-  Timer {
-    id: scanWatchdog
-    interval: (service.scanDeadline + 5) * 1000
-    onTriggered: scanProc.running = false
-  }
   Timer {
     id: ocrWatchdog
     interval: (service.ocrDeadline + 5) * 1000
@@ -213,10 +243,10 @@ Item {
   IpcHandler {
     target: "otp"
 
-    // Copy the passcode from the most recent notification that carries one.
+    // Copy the passcode from the newest notification that carried one, if it
+    // arrived in the last ten minutes.
     function copyLast(): string {
-      if (scanProc.running) return "busy"
-      scanProc.running = true
+      service.copyHeld()
       return "ok"
     }
 

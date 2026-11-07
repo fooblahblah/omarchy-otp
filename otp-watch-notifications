@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Print one compact JSON line per desktop notification, as it is sent:
+#
+#   {"app":"Beeper","summary":"Chase","body":"Your verification code is ..."}
+#
+# Every notification on the session bus is a Notify method call to whichever
+# program owns org.freedesktop.Notifications (the Omarchy shell). This watches
+# those calls as a bus monitor, which needs no privileges on the user's own
+# bus, and keeps only the three fields the passcode heuristic reads. Hints,
+# icons and image data are dropped here, so they never reach the shell.
+#
+# Nothing is written anywhere but stdout. The plugin decides what to keep.
+#
+#   otp-watch-notifications            watch the session bus until stopped
+#   otp-watch-notifications --filter   read busctl --json=short lines on stdin
+#                                      (what the tests drive)
+
+set -uo pipefail
+exec 2>/dev/null
+
+readonly MAX_APP=64
+readonly MAX_SUMMARY=512
+readonly MAX_BODY=4096
+
+# Lines are read raw and parsed with fromjson?, so a line that is not JSON is
+# skipped instead of ending the stream. Notify's arguments are, in order:
+# app_name, replaces_id, app_icon, summary, body, actions, hints, timeout.
+filter='
+  fromjson?
+  | select(type == "object" and .member == "Notify")
+  | .payload.data
+  | select(type == "array")
+  | {
+      app: ((.[0] // "") | tostring | .[0:'"$MAX_APP"']),
+      summary: ((.[3] // "") | tostring | .[0:'"$MAX_SUMMARY"']),
+      body: ((.[4] // "") | tostring | .[0:'"$MAX_BODY"'])
+    }'
+
+if [[ ${1:-} == --filter ]]; then
+  exec jq -R -c --unbuffered "$filter"
+fi
+
+busctl --user monitor --json=short \
+  --match "type='method_call',interface='org.freedesktop.Notifications',member='Notify'" \
+  | jq -R -c --unbuffered "$filter"
