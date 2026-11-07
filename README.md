@@ -40,6 +40,9 @@ memory → clipboard.
   toast's text would otherwise outlive the code.
 - A held code is dropped from memory 10 minutes after its notification
   arrived, whether or not it was copied.
+- A copied code is cleared from the clipboard after 60 seconds, as Omarchy's
+  own copy button does — but only if it is still what is on the clipboard, so
+  anything you copied since is left alone.
 - Every helper runs under `timeout(1)`, which signals the helper's whole
   process group when the shell stops it — or, for the OCR path, after 90 s
   including the time you take to draw the selection — and escalates to
@@ -83,7 +86,7 @@ OCR chain.
 |---|---|---|
 | `busctl` | `systemd` | Watching notifications on the session bus |
 | `jq` | `jq` | Trimming each notification to app, title and body |
-| `wl-copy` | `wl-clipboard` | Putting the code on the clipboard |
+| `wl-copy`, `wl-paste` | `wl-clipboard` | Putting the code on the clipboard, and clearing it after a minute |
 | `timeout`, `head` | `coreutils` | Process-group teardown and bounded reads |
 | `pkill` | `procps-ng` | Tearing down the OCR helpers |
 | `setpriv` | `util-linux` | Tying the watcher's processes to the shell's lifetime |

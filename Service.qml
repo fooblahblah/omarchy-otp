@@ -34,6 +34,12 @@ Item {
   // to call), as OtpLogic reports it, stamped with when it arrived. Memory only.
   property var held: null
 
+  // As with the shell's own copy button, a copied code comes off the clipboard
+  // after a minute -- but only if it is still what is there, so anything copied
+  // since is left alone. `copied` is what to compare against, until then.
+  readonly property int clipboardLifetime: 60 * 1000
+  property string copied: ""
+
   // Deadlines, in seconds. OCR includes the user drawing a selection, so it
   // gets long enough to not feel rushed.
   readonly property int ocrDeadline: 90
@@ -77,6 +83,8 @@ Item {
     copyProc.pending = code
     copyProc.stdinEnabled = true
     copyProc.running = true
+    copied = code
+    clipboardLife.restart()
     notify("Copied 2FA code", maskOf(code) + " · from " + source, "󰅍")
   }
 
@@ -242,6 +250,35 @@ Item {
   }
 
   Process { id: notifyProc }
+
+  Timer {
+    id: clipboardLife
+    interval: service.clipboardLifetime
+    onTriggered: {
+      if (!service.copied) return
+      clipCheck.running = false
+      clipCheck.running = true
+    }
+  }
+
+  // Only the text type wl-copy offered is asked for, so an image copied since
+  // is never pulled into the shell, and simply does not match.
+  Process {
+    id: clipCheck
+    command: service.withDeadline(service.helperDeadline,
+      ["wl-paste", "--no-newline", "--type", "text/plain;charset=utf-8"])
+    stdout: StdioCollector {
+      onStreamFinished: {
+        if (service.copied && String(text) === service.copied) clearProc.running = true
+        service.copied = ""
+      }
+    }
+  }
+
+  Process {
+    id: clearProc
+    command: service.withDeadline(service.helperDeadline, ["wl-copy", "--clear"])
+  }
 
   IpcHandler {
     target: "otp"
